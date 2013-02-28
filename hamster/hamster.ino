@@ -12,8 +12,9 @@
  */
 #include <SPI.h>
 #include <WiFi.h>
-#include<stdlib.h>
-
+#include <HttpClient.h>
+#include <Cosm.h>
+#include <stdlib.h>
 
 // Configuration constants
 #define TRUE                 1
@@ -33,7 +34,7 @@
 // Cosm related constants
 #define API_KEY "wZ2Oh89Pc6J9yhKZH3gmGZlvU5mSAKxkRVJvSlhVY3BBZz0g" // your Cosm API key
 #define FEED_ID 107080                                             // your Cosm feed ID
-#define USER_AGENT      "Hamster"                                  // user agent is the project name
+char cosmKey[] = API_KEY;                                          // Your Cosm key to let you upload data 
 
 // Wifi related variable declarations
 char ssid[] = "smackdown";      //  your network SSID (name) 
@@ -41,13 +42,20 @@ char pass[] = "carnielchesterford";   // your network password
 
 int status = WL_IDLE_STATUS;
 
-// initialize the library instance:
-WiFiClient client;
+// Define the strings for our datastream IDs
+char lapId[] = "laps";
+char meterId[] = "meters";
+const int bufferSize = 140;
+char bufferValue[bufferSize]; // enough space to store the string we're going to send
+CosmDatastream datastreams[] = {
+  CosmDatastream(lapId, strlen(lapId), DATASTREAM_INT),
+  CosmDatastream(meterId, strlen(meterId), DATASTREAM_INT)
+};
+// Finally, wrap the datastreams into a feed
+CosmFeed feed(FEED_ID, datastreams, 2 /* number of datastreams */);
 
-// if you don't want to use DNS (and reduce your sketch size)
-// use the numeric IP instead of the name for the server:
-IPAddress server(216,52,233,121);      // numeric IP for api.pachube.com
-//char server[] = "api.cosm.com";   // name address for pachube API
+WiFiClient client;
+CosmClient cosmclient(client);
 
 unsigned long lastConnectionTime = 0;          // last time you connected to the server, in milliseconds
 boolean lastConnected = false;                 // state of the connection last time through the main loop
@@ -134,7 +142,7 @@ void switchBanks() {
 // Interrupt handler for updating wheel statistics
 void hamsterInterrupt() {
   // simply stamp time in appropriate bank/location and increment ptr
-  bank[currBank][currBankIndex[currBank]++] = millis();          // XXX switch to ptrs later
+  bank[currBank][currBankIndex[currBank]++] = millis();
   if (gHigh) {
     digitalWrite(13, HIGH);
     gHigh = 0;
@@ -202,7 +210,7 @@ void calcMaxSpeed() {
 void calcStats() {
    calcTotalRevolutions();
    calcTotalMiles();                  // depends on total revolution count being calculated first
-   calcTotalMeters();                  // depends on total revolution count being calculated first
+   calcTotalMeters();                 // depends on total revolution count being calculated first
    calcAvgSpeed();
    calcMaxSpeed();
 }
@@ -267,93 +275,23 @@ void sendFeedUpdate() {
   // if you're not connected, and ten seconds have passed since
   // your last connection, then connect again and send data:
   if(!client.connected() && (millis() - lastConnectionTime > postingInterval)) {
-    sendDataStream("laps", currBankIndex[lastBank]);
-    sendDataStream("meters", gStatTotalMeters);
+    sendHamsterData();               // our method to send datastreams to Cosm
   }
   // store the state of the connection for next time through
   // the loop:
   lastConnected = client.connected();
 }
 
-// this method makes a HTTP connection to the server:
-void sendDataStream(String name, unsigned int value) {
-  // if there's a successful connection:
-  if (client.connect(server, 80)) {
-    Serial.println("connecting...");
-    // send the HTTP PUT request:
-    client.print("PUT /v2/feeds/");
-    client.print(FEED_ID);
-    client.println(".csv HTTP/1.1");
-    client.println("Host: api.cosm.com");
-    client.print("X-ApiKey: ");
-    client.println(API_KEY);
-    client.print("User-Agent: ");
-    client.println(USER_AGENT);
-    client.print("Content-Length: ");
+// this method sends datastreams to Cosm using Cosm Client
+void sendHamsterData() {
 
-    // calculate the length of the sensor reading in bytes + 1 for comma
-    int thisLength = 1 +  name.length() + getIntLength(value);
-    client.println(thisLength);
-
-    // last pieces of the HTTP PUT request:
-    client.println("Content-Type: text/csv");
-    client.println("Connection: close");
-    client.println();
-
-    // here's the actual content of the PUT request:
-    client.print(name);
-    client.print(',');
-    client.println(value);
-  } 
-  else {
-    // if you couldn't make a connection:
-    Serial.println("connection failed");
-    Serial.println();
-    Serial.println("disconnecting.");
-    client.stop();
-  }
-   // note the time that the connection was made or attempted:
+  // put Laps into datastream 0
+//  datastreams[0].setInt(currentBankIndex[lastBank]);
+//  datastreams[1].setInt(gStatTotalMeters);
+    datastreams[0].setInt(0);
+    datastreams[1].setInt(0);
+  int ret = cosmclient.put(feed, cosmKey);
   lastConnectionTime = millis();
-}
-
-
-// This method calculates the number of digits in an
-// integer.  Since each digit of the ASCII decimal
-// representation is a byte, the number of digits equals
-// the number of bytes:
-
-int getIntLength(int someValue) {
-  // there's at least one byte:
-  int digits = 1;
-  // continually divide the value by ten, 
-  // adding one to the digit count for each
-  // time you divide, until you're at 0:
-  int dividend = someValue /10;
-  while (dividend > 0) {
-    dividend = dividend /10;
-    digits++;
-  }
-  // return the number of digits:
-  return digits;
-}
-
-// This method calculates the number of digits in a float
-// Since each digit of the ASCII decimal
-// representation is a byte, the number of digits equals
-// the number of bytes:
-
-int getFloatLength(float someValue) {
-  char resultStr[20];
-  int i, len;
-  
-  dtostrf(someValue,4,2,resultStr);
-  len = 0;
-  for(i=0;i<20;i++) {
-    if (resultStr[i] == '\0')
-      break;
-    len++;
-  }
-  return len;
 }
 
 void printWifiStatus() {

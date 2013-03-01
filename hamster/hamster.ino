@@ -8,13 +8,15 @@
  *  Fastest Speed:  mph
  *
  * Author: Dave LeRoy
- * Source: http://github/???
+ * Source: https://github.com/dleroy/Arduino.git
+ * Version: $Id:$
  */
 #include <SPI.h>
 #include <WiFi.h>
 #include <HttpClient.h>
 #include <Cosm.h>
 #include <stdlib.h>
+#include "config.h"
 
 // Configuration constants
 #define TRUE                 1
@@ -32,13 +34,12 @@
 //////////////////////////////////////////////////////////////////////////////////////////
 
 // Cosm related constants
-#define API_KEY "wZ2Oh89Pc6J9yhKZH3gmGZlvU5mSAKxkRVJvSlhVY3BBZz0g" // your Cosm API key
-#define FEED_ID 107080                                             // your Cosm feed ID
+
 char cosmKey[] = API_KEY;                                          // Your Cosm key to let you upload data 
 
 // Wifi related variable declarations
-char ssid[] = "smackdown";      //  your network SSID (name) 
-char pass[] = "carnielchesterford";   // your network password
+char ssid[] = MY_SSID;      //  your network SSID (name) 
+char pass[] = MY_WIFIPASS;   // your network password
 
 int status = WL_IDLE_STATUS;
 
@@ -286,10 +287,8 @@ void sendFeedUpdate() {
 void sendHamsterData() {
 
   // put Laps into datastream 0
-//  datastreams[0].setInt(currentBankIndex[lastBank]);
-//  datastreams[1].setInt(gStatTotalMeters);
-    datastreams[0].setInt(0);
-    datastreams[1].setInt(0);
+  datastreams[0].setInt(currBankIndex[lastBank]);
+  datastreams[1].setInt(gStatTotalMeters);
   int ret = cosmclient.put(feed, cosmKey);
   lastConnectionTime = millis();
 }

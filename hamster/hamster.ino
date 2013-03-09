@@ -1,11 +1,7 @@
 /*
  *  Hamster Tracker
  *  This program counts the rotations of a hamster wheel using a hall effect sensor. It
- *  then keeps a running tabulation of the following statistics:
- *  Total Distance: in miles
- *  Total Revolutions:
- *  Average Speed:  mph
- *  Fastest Speed:  mph
+ *  then uploads timestamped data to Cosm website to be analyzed.
  *
  * Author: Dave LeRoy
  * Source: https://github.com/dleroy/Arduino.git
@@ -15,14 +11,15 @@
 #include <WiFi.h>
 #include <HttpClient.h>
 #include <Cosm.h>
+#include <Time.h>
 #include <stdlib.h>
 #include "config.h"
 
 // Configuration constants
 #define TRUE                 1
 #define FALSE                0
-#define PROCESSING_INTERVAL  30000        // 30 secs by default
-#define MAX_BANK_SAMPLES      1024       // sizing of the banks
+#define PROCESSING_INTERVAL  20000        // 20 secs by default
+#define MAX_BANK_SAMPLES       256       // sizing of the banks
 #define WHEEL_CIRC           18.75       // hamster wheel circumference in inches
 #define INIT_FASTEST_LAP     0xffffffff  // initial fastest lap in milliseconds for comparison
 
@@ -45,15 +42,16 @@ int status = WL_IDLE_STATUS;
 
 // Define the strings for our datastream IDs
 char lapId[] = "laps";
-char meterId[] = "meters";
+char milesId[] = "miles";
+char timestampId[] = "timestamps";
 const int bufferSize = 140;
-char bufferValue[bufferSize]; // enough space to store the string we're going to send
 CosmDatastream datastreams[] = {
   CosmDatastream(lapId, strlen(lapId), DATASTREAM_INT),
-  CosmDatastream(meterId, strlen(meterId), DATASTREAM_INT)
+  CosmDatastream(milesId, strlen(milesId), DATASTREAM_FLOAT),
+  CosmDatastream(timestampId, strlen(timestampId), DATASTREAM_INT)
 };
 // Finally, wrap the datastreams into a feed
-CosmFeed feed(FEED_ID, datastreams, 2 /* number of datastreams */);
+CosmFeed feed(FEED_ID, datastreams, 3 /* number of datastreams */);
 
 WiFiClient client;
 CosmClient cosmclient(client);
@@ -67,9 +65,9 @@ const unsigned long postingInterval = 10*1000; //delay between updates to pachub
 // Variables used in stats collection
 int volatile currBank;                                  // which of the 2 banks is currently accumlating sensor input.
 int lastBank;                                           // which of the 2 banks is currently being looked at for stats. 
-unsigned int volatile bank[2][MAX_BANK_SAMPLES];        // the 2 banks to hold sample data
+unsigned long volatile bank[2][MAX_BANK_SAMPLES];       // the 2 banks to hold sample data
 unsigned int volatile currBankIndex[2];                 // current location in each bank
-unsigned int gLastTimestamp;                            // store last timestamp reading from prior bank to do speed calculations
+unsigned long gLastTimestamp;                            // store last timestamp reading from prior bank to do speed calculations
 int gFastestLap;                                        // store fastest lap for max speed calulations
 unsigned int volatile gHigh;
 
@@ -80,6 +78,10 @@ float gStatTotalMiles;                          // total hamster miles
 float gStatAvgSpeed;                            // average hamster speed mph
 float gStatMaxSpeed;                            // max hamster speed mph
 
+// Time related definitions
+time_t gBaseTime;                              // Time when first initialized
+unsigned long gBaseMillis;                     // accompanying millis() reading when first initialized
+
 //////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -88,6 +90,7 @@ void setup() {
   initDataCollection();                          // Initialize collection banks and statistics
   initSerial(); 
   initWifi();                                    // Get Wifi connection established before we start collecting data.
+  initTime();
   initInterrupts();                              // Interrupts disabled by this routine
   pinMode(13, OUTPUT);                           // Blink LED on each lap
 }
@@ -176,35 +179,6 @@ void calcAvgSpeed() {
 
 // update the max speed calculation. Current just taking fastest revolution
 void calcMaxSpeed() {
-  int updated = FALSE;
-  unsigned int newLap;
-  int tmpVal = 0;
-  int x;
-
-  // Boundary case, compare last timestamp in prior bank to first in this bank
-  if (currBankIndex[lastBank] && gLastTimestamp) {
-    newLap = bank[lastBank][0] - gLastTimestamp;
-    if (newLap && newLap < gFastestLap) {
-      gFastestLap = bank[lastBank][0] - gLastTimestamp;
-    }    
-  }
-
-  // Loop through lastBank and see if any of the revolution speeds are faster than current max speed
-  for (x=1; x <= currBankIndex[lastBank]; x++) {
-    newLap = bank[lastBank][x] - bank[lastBank][x-1];
-    if (newLap && (newLap < gFastestLap)) {
-      gFastestLap = bank[lastBank][x] - bank[lastBank][x-1];
-      updated = TRUE;
-    }
-  }
-
-  // store last timestamp for next calculation boundary case    
-  gLastTimestamp = bank[lastBank][currBankIndex[lastBank]];
-
-  // Calculate max speed based on fastest lap and wheel circumference
-  if (updated) {
-    gStatMaxSpeed = MSEC_PER_REV_CONV/gFastestLap;
-  }
 }
 
 // Calculate Statistics
@@ -224,11 +198,20 @@ void printStats() {
   Serial.println(gStatTotalMeters);
   Serial.print("Total Distance (miles): ");
   Serial.println(gStatTotalMiles);
-  Serial.print("Avg Speed (mph):       ");
-  Serial.println(gStatAvgSpeed);
-  Serial.print("Max Speed (mph):       ");
-  Serial.println(gStatMaxSpeed);
   Serial.println("");
+}
+
+
+// Initialize time of day
+void initTime() {
+  // Set current time...from some source TBD ...need to offset by 8 hours for Cosm
+  setTime(20,30,00,9,3,2013);
+
+  // mark accompanying millis() value ...good enough for what we are doing
+  gBaseTime = now();
+  gBaseMillis = millis();
+   
+  return;
 }
 
 // Initialize Wifi connection
@@ -288,8 +271,26 @@ void sendHamsterData() {
 
   // put Laps into datastream 0
   datastreams[0].setInt(currBankIndex[lastBank]);
-  datastreams[1].setInt(gStatTotalMeters);
+  datastreams[1].setFloat(gStatTotalMiles);
+  // Put normal datastream updates first
   int ret = cosmclient.put(feed, cosmKey);
+  if (ret < 0) {
+    // log error
+    Serial.print("Error putting data to Cosm: ");
+    Serial.println(ret*-1);
+  }
+
+  // If there were any new points, then updated timestamped points
+  if (currBankIndex[lastBank]) {
+    String pointsJSON = "";
+    dataPointstoJSON(pointsJSON);
+    int ret2 = cosmclient.putPoints(feed, pointsJSON, cosmKey);
+      if (ret2 < 0) {
+      // log error
+      Serial.print("Error putting points to Cosm: ");
+      Serial.println(ret2*-1);
+    }
+  }
   lastConnectionTime = millis();
 }
 
@@ -310,6 +311,81 @@ void printWifiStatus() {
   Serial.println(" dBm");
 }
 
+// Given a millisecond count, generate valid Cosm timestamp for datapoint update
+// e.g "2013-03-07T11:01:43.235Z"
+int GenerateTimeString(String& timestring, unsigned long msec) {
+  unsigned long msecdiff;
+  unsigned long timenow;
+  tmElements_t tm;
+
+  if (msec < gBaseMillis) {
+    Serial.println("Invalid msec reading passed to GenerateTimeString");
+    Serial.print("msec: ");
+    Serial.println(msec);
+    Serial.print("basemsec: ");
+    Serial.println(gBaseMillis);
+    return -1;
+  } else {
+    msecdiff = msec - gBaseMillis;
+  }
+  
+  // Calculate new timenow based on elapsed seconds from base millis() reading
+  timenow = (unsigned long)gBaseTime + msecdiff/1000;
+
+  // get msec remainder
+  msecdiff = msecdiff - ((msecdiff/1000) * 1000);
+
+  breakTime((time_t)timenow, tm);
+  timestring.concat(tmYearToCalendar(tm.Year));
+  timestring += "-";
+  timestring.concat(tm.Month);
+  timestring += "-";
+  timestring.concat(tm.Day);
+  timestring += "T";
+  timestring.concat(tm.Hour);
+  timestring += ":";
+  timestring.concat(tm.Minute);
+  timestring += ":";
+  timestring.concat(tm.Second);
+  timestring += ".";
+  timestring.concat(msecdiff);
+  timestring += "Z";
+ 
+  return 0;
+}
+
+// Print last collected datapoints in JSON format for COSM datastream update
+// e.g.
+//
+// {
+//  "datapoints":[
+//    {"at":"2013-03-07T11:01:43Z","value":"294"},
+//
+//   ]
+// }
+void dataPointstoJSON(String& points) {
+
+  int i;
+  
+  if (currBankIndex[lastBank]) {
+    points = "{\n  \"datapoints\":[\n";
+
+    for(i=0; i< currBankIndex[lastBank]; i++) {
+      String timestring = String("");
+      if (GenerateTimeString(timestring, bank[lastBank][i]) >= 0) {
+        points += "    {\"at\":\"";
+        points += timestring;
+        if (i == (currBankIndex[lastBank] -1)) {
+          points += "\",\"value\":\"1\"}\n";
+        } else {
+          points += "\",\"value\":\"1\"},\n";
+        }
+      }
+    }
+    points += "  ]\n";
+    points += "}\n";
+  }
+}
 
 
 
